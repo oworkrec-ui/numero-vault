@@ -1,0 +1,4 @@
+Numero Vault first sign-in
+Username: admin
+Password: sLzKjlviM52a
+You will be asked to choose a new password. Delete this file afterwards.

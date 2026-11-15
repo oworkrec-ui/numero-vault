@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Numero Vault</title>
+<link rel="icon" href="logo.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Schibsted+Grotesk:wght@600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<main class="login hide" id="login">
+  <form class="logincard" id="loginForm" autocomplete="on">
+    <div class="brandrow"><img src="logo.png" alt="Numero Uno logo"><div><b>Numero Vault</b><div class="sub">Secure document store</div></div></div>
+    <label class="field"><span>Username</span><input type="text" id="lgUser" name="username" autocomplete="username" required></label>
+    <label class="field"><span>Password</span><input type="password" id="lgPass" name="password" autocomplete="current-password" required></label>
+    <div class="err" id="lgErr" role="alert"></div>
+    <button class="btn primary" id="lgBtn" type="submit">Sign in</button>
+    <div class="sub">Forgot your password? Ask a vault admin to reset it.</div>
+  </form>
+</main>
+
+<div class="app hide" id="app">
+<aside class="sidebar"><div class="sideinner">
+  <div class="brandrow"><img src="logo.png" alt="Numero Uno logo"><div><b>Numero Vault</b><div class="sub">Secure document store</div></div></div>
+  <nav class="tabs" id="tabs" role="tablist" aria-label="Menu">
+    <button role="tab" data-tab="files" aria-selected="true">Files</button>
+    <button role="tab" data-tab="dashboard" class="hide">Dashboard</button>
+    <button role="tab" data-tab="people" class="hide">People</button>
+    <button role="tab" data-tab="requests" class="hide">Requests<span class="n hide" id="reqN"></span></button>
+    <button role="tab" data-tab="audit" class="hide">Audit log</button>
+  </nav>
+  <div id="fileNav" class="side">
+    <div class="lbl">Views</div>
+    <div id="views"></div>
+    <div class="lbl">Folders</div>
+    <div id="tree"></div>
+    <div id="folderTools" class="acts" style="justify-content:flex-start"></div>
+  </div>
+  <div class="who" id="who"></div>
+  <div class="usermenu">
+    <button id="btnTheme">Theme colour</button>
+    <button id="btnPass">Change password</button>
+    <button id="btnOut">Sign out</button>
+  </div>
+</div></aside>
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <h1 id="pageTitle">Files</h1>
+      <div class="sub" id="subline"></div>
+    </div>
+  </header>
+
+  <details class="note hide" id="adminHelp">
+    <summary>How access works</summary>
+    <ol>
+      <li>Create each person on the <b>People</b> tab with a username and a temporary password. They choose their own password at first sign-in.</li>
+      <li>Put people in groups, and tick what they may do: view, download, copy, edit.</li>
+      <li>Access can be set on a single file, on a folder (it covers everything inside), for a person or for a group. Permissions from all of these add up.</li>
+      <li>A person only ever sees the files granted to them. Requests and comments arrive on the <b>Requests</b> tab. An approved edit request lets the person save one change; to edit again they must ask again.</li>
+      <li>People with the <b>Admin</b> role see every file and manage everything.</li>
+    </ol>
+  </details>
+
+  <section id="pane-files">
+    <div class="panel" id="filePanel">
+      <div class="toolbar">
+        <input class="grow" type="search" id="q" placeholder="Search name, description or tags" aria-label="Search files">
+        <div class="checks"><label><input type="checkbox" id="deep">Search inside files</label></div>
+        <select id="sortSel" aria-label="Sort">
+          <option value="new">Newest first</option><option value="name">Name A to Z</option><option value="size">Largest first</option>
+        </select>
+        <span class="meter" id="meter"></span>
+        <button class="btn primary hide" id="uploadBtn">Upload files</button>
+        <input type="file" id="fileInput" multiple class="hide">
+      </div>
+      <div class="bulk hide" id="bulkBar"></div>
+      <div class="scroll" id="fileList"><div class="empty">Opening the vault…</div></div>
+      <div class="legend"><span><b>V</b> view</span><span><b>D</b> download</span><span><b>C</b> copy text</span><span><b>E</b> edit, rename, replace</span></div>
+    </div>
+  </section>
+
+  <section class="stack hide" id="pane-people">
+    <div class="panel">
+      <div class="sechead"><h3>Groups</h3>
+        <div style="display:flex;gap:8px;flex:1 1 240px;max-width:420px"><input type="text" id="groupName" placeholder="New group name, for example Sales" aria-label="New group name"><button class="btn" id="groupAdd">Add group</button></div>
+      </div>
+      <div class="scroll" id="groupList"></div>
+    </div>
+    <div class="panel">
+      <div class="sechead"><h3>Users</h3><button class="btn primary" id="userAdd">Add user</button></div>
+      <div class="scroll" id="userList"></div>
+    </div>
+  </section>
+
+  <section class="stack hide" id="pane-requests">
+    <div class="panel"><div class="sechead"><h3>Access requests</h3></div><div class="scroll" id="reqList"></div></div>
+    <div class="panel"><div class="sechead"><h3>Recent comments</h3></div><div id="comList"></div></div>
+  </section>
+
+  <section class="stack hide" id="pane-dashboard"><div class="tiles" id="tiles"></div><div class="two" id="dash"></div><div id="drill"></div></section>
+
+  <section class="panel hide" id="pane-audit">
+    <div class="toolbar">
+      <select id="afPerson" aria-label="Person"><option value="">Everyone</option></select>
+      <select id="afAction" aria-label="Action"><option value="">All actions</option></select>
+      <input class="grow" type="search" id="afFile" placeholder="Filter by file or detail" aria-label="Filter by file">
+      <label class="sub" for="afFrom">From</label><input type="date" id="afFrom">
+      <label class="sub" for="afTo">To</label><input type="date" id="afTo">
+      <button class="btn" id="afExport">Export for Excel</button>
+    </div>
+    <div class="scroll" id="actList"></div>
+  </section>
+</div>
+</div>
+
+<div class="overlay" id="overlay"><div class="modal" id="modal" role="dialog" aria-modal="true">
+  <div class="mhead" id="mhead"></div><div class="mbody" id="mbody"></div><div class="mfoot" id="mfoot"></div>
+</div></div>
+<div id="toasts" aria-live="polite"></div>
+<div id="tip" class="tip hide"></div>
+<script src="app.js"></script>
+</body>
+</html>

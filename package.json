@@ -1,0 +1,8 @@
+{
+  "name": "numero-vault",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Numero Vault: secure document store with per-user access levels",
+  "scripts": { "start": "node server.js", "get-libs": "node get-libs.js" },
+  "engines": { "node": ">=18" }
+}
