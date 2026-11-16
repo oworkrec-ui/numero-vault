@@ -18,6 +18,7 @@
     <div class="err" id="lgErr" role="alert"></div>
     <button class="btn primary" id="lgBtn" type="submit">Sign in</button>
     <div class="sub">Forgot your password? Ask a vault admin to reset it.</div>
+    <div class="sub">Activity in this vault is recorded and can be watched live by its administrators.</div>
   </form>
 </main>
 
@@ -26,6 +27,7 @@
   <div class="brandrow"><img src="logo.png" alt="Numero Uno logo"><div><b>Numero Vault</b><div class="sub">Secure document store</div></div></div>
   <nav class="tabs" id="tabs" role="tablist" aria-label="Menu">
     <button role="tab" data-tab="files" aria-selected="true">Files</button>
+    <button role="tab" data-tab="live" class="hide">Live<span class="n good hide" id="liveN"></span></button>
     <button role="tab" data-tab="dashboard" class="hide">Dashboard</button>
     <button role="tab" data-tab="people" class="hide">People</button>
     <button role="tab" data-tab="requests" class="hide">Requests<span class="n hide" id="reqN"></span></button>
@@ -39,6 +41,7 @@
     <div id="folderTools" class="acts" style="justify-content:flex-start"></div>
   </div>
   <div class="who" id="who"></div>
+  <div class="sub hide" id="monNote" style="padding:0 4px">Your activity here is recorded and can be watched live by the vault admins.</div>
   <div class="usermenu">
     <button id="btnTheme">Theme colour</button>
     <button id="btnPass">Change password</button>
@@ -52,6 +55,9 @@
       <div class="sub" id="subline"></div>
     </div>
   </header>
+
+  <div class="note hide" id="storeWarn" role="alert" style="background:var(--crit-soft);color:var(--crit)"></div>
+  <div class="sub hide" id="storeInfo"></div>
 
   <details class="note hide" id="adminHelp">
     <summary>How access works</summary>
@@ -98,6 +104,11 @@
   <section class="stack hide" id="pane-requests">
     <div class="panel"><div class="sechead"><h3>Access requests</h3></div><div class="scroll" id="reqList"></div></div>
     <div class="panel"><div class="sechead"><h3>Recent comments</h3></div><div id="comList"></div></div>
+  </section>
+
+  <section class="stack hide" id="pane-live">
+    <div class="panel"><div class="sechead"><h3>Online now</h3><span class="sub" id="liveSum"></span></div><div class="scroll" id="liveList"></div></div>
+    <div class="panel"><div class="sechead"><h3>Live activity</h3><span class="sub">Updates every few seconds</span></div><div class="scroll" id="liveFeed"></div></div>
   </section>
 
   <section class="stack hide" id="pane-dashboard"><div class="tiles" id="tiles"></div><div class="two" id="dash"></div><div id="drill"></div></section>

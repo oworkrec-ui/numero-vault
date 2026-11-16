@@ -7,21 +7,34 @@ const PORT = +process.env.PORT || 8080, HOST = process.env.HOST || '0.0.0.0';
 const DATA = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
 const PUB = path.join(__dirname, 'public'), FILES = path.join(DATA, 'files');
 const DBF = path.join(DATA, 'db.json'), AUDF = path.join(DATA, 'audit.jsonl');
-const DAY = 864e5, BIN_DAYS = 30, SESSION_DAYS = 7, PERMS = 'vdce';
-fs.mkdirSync(FILES, { recursive: true });
+const STARTED = Date.now(), DAY = 864e5, BIN_DAYS = 30, SESSION_DAYS = 7, PERMS = 'vdce';
+const LOCK = path.join(DATA, 'server.lock'), ERRLOG = path.join(DATA, 'server-errors.log');
+function fatal(msg) { console.error('\nNUMERO VAULT CANNOT START\n' + msg + '\n'); process.exit(1); }
+try { fs.mkdirSync(FILES, { recursive: true }); fs.writeFileSync(path.join(DATA, '.write-test'), 'ok'); fs.unlinkSync(path.join(DATA, '.write-test')); }
+catch (e) { fatal('The data folder cannot be written to:\n  ' + DATA + '\n  (' + e.message + ')\nMove Numero Vault out of Program Files or a synced/read-only folder, or set DATA_DIR to a folder this account may write to.'); }
+try { const pid = +fs.readFileSync(LOCK, 'utf8'), fresh = Date.now() - fs.statSync(LOCK).mtimeMs < 25000; if (pid && pid !== process.pid && fresh) { process.kill(pid, 0); fatal('Another Numero Vault (process ' + pid + ') is already running on this data folder:\n  ' + DATA + '\nTwo servers on one data folder overwrite each other\'s changes. Close the other one first. Run only one instance (no cluster mode).\nIf you stopped it a moment ago, wait half a minute and start again.'); } }
+catch (e) { if (e.code === 'EPERM') fatal('Another Numero Vault is already running on this data folder: ' + DATA); }
+fs.writeFileSync(LOCK, String(process.pid));
+setInterval(() => { const t = new Date(); fs.utimes(LOCK, t, t, () => {}); }, 10000).unref();
+let storageError = '';
+function logError(where, e) { const line = new Date().toISOString() + ' ' + where + ': ' + (e && e.stack || e) + '\n'; console.error(line); try { fs.appendFileSync(ERRLOG, line); } catch (x) {} }
 
 /* ---------- storage ---------- */
 let db = { settings: { brand: '#1f4081' }, users: {}, groups: {}, folders: {}, files: {}, requests: {}, comments: {}, favs: {}, sessions: {} };
 if (fs.existsSync(DBF)) db = Object.assign(db, JSON.parse(fs.readFileSync(DBF, 'utf8')));
 let saveTimer = null, dirty = false;
 function save() { dirty = true; if (!saveTimer) saveTimer = setTimeout(flush, 150); }
-function flush() { saveTimer = null; if (!dirty) return; dirty = false; const tmp = DBF + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(db)); fs.renameSync(tmp, DBF); }
+function flush() { saveTimer = null; if (!dirty) return; dirty = false; const tmp = DBF + '.tmp', json = JSON.stringify(db);
+  try { fs.writeFileSync(tmp, json);
+    let done = false; for (let i = 0; i < 5 && !done; i++) { try { fs.renameSync(tmp, DBF); done = true; } catch (e) { if (i === 4) { fs.writeFileSync(DBF, json); done = true; } } } // Windows: antivirus or sync tools can hold the file for a moment
+    storageError = ''; }
+  catch (e) { storageError = 'Changes could not be written to ' + DBF + ' (' + e.message + ').'; logError('save', e); dirty = true; if (!saveTimer) saveTimer = setTimeout(flush, 3000); } }
 function backup() { try { flush(); if (fs.existsSync(DBF)) fs.copyFileSync(DBF, path.join(DATA, 'db.backup-' + new Date().toISOString().slice(0, 10) + '.json'));
   const old = fs.readdirSync(DATA).filter(n => /^db\.backup-/.test(n)).sort(); while (old.length > 14) fs.unlinkSync(path.join(DATA, old.shift())); } catch (e) { console.error('backup failed', e.message); } }
 
 let events = [];
 if (fs.existsSync(AUDF)) for (const line of fs.readFileSync(AUDF, 'utf8').split('\n')) { if (line) try { events.push(JSON.parse(line)); } catch (e) {} }
-function audit(uid, a, n, extra) { const e = Object.assign({ t: Date.now(), uid, a, n: String(n || '').slice(0, 200) }, extra || {}); events.push(e); fs.appendFile(AUDF, JSON.stringify(e) + '\n', () => {}); }
+function audit(uid, a, n, extra) { const e = Object.assign({ t: Date.now(), uid, a, n: String(n || '').slice(0, 200) }, extra || {}); events.push(e); fs.appendFile(AUDF, JSON.stringify(e) + '\n', err => { if (err) { storageError = 'The audit log could not be written (' + err.message + ').'; logError('audit', err); } }); }
 
 /* ---------- helpers ---------- */
 class HttpError extends Error { constructor(status, message, code) { super(message); this.status = status; this.code = code; } }
@@ -49,6 +62,22 @@ if (!Object.keys(db.users).length) {
   const note = 'Numero Vault first sign-in\nUsername: admin\nPassword: ' + pw + '\nYou will be asked to choose a new password. Delete this file afterwards.\n';
   fs.writeFileSync(path.join(DATA, 'FIRST-LOGIN.txt'), note); console.log('\n' + note);
 }
+
+/* ---------- recovery: stored files the database does not know about (for example after an interrupted save) ---------- */
+(function recover() { let n = 0;
+  for (const id of fs.readdirSync(FILES)) { if (!/^f_[a-f0-9]+$/.test(id) || db.files[id]) continue; const dir = path.join(FILES, id); let names = [];
+    try { names = fs.readdirSync(dir); } catch (e) { continue; }
+    for (const x of names) if (x.endsWith('.part')) try { fs.unlinkSync(path.join(dir, x)); } catch (e) {}
+    const vs = names.map(x => /^(\d+)\.bin$/.exec(x)).filter(Boolean).map(m => +m[1]).sort((a, b) => a - b); if (!vs.length) continue;
+    if (events.some(e => e.f === id && e.a === 'purge')) continue; // deliberately deleted; leftovers only
+    let name = ''; for (const e of events) if (e.f === id && (e.a === 'upload' || e.a === 'edit') && e.n && !/^Renamed to /.test(e.n)) name = e.n;
+    const up = events.find(e => e.f === id && e.a === 'upload'), sizeOf = v => { try { return fs.statSync(path.join(dir, v + '.bin')).size; } catch (e) { return 0; } }, cur = vs[vs.length - 1];
+    db.files[id] = { name: name || 'recovered-' + id.slice(2, 10), size: sizeOf(cur), mime: '', folder: 'Recovered', tags: [], desc: 'Recovered automatically after a storage problem. Check the name, folder and access.', docDate: '', review: '',
+      at: up ? up.t : Date.now(), by: up ? up.uid : '', v: cur, versions: vs.slice(0, -1).map(v => ({ v, name: name || 'earlier version', size: sizeOf(v), mime: '', at: up ? up.t : Date.now(), by: '' })),
+      grants: {}, ggrants: {}, limits: {}, once: {}, views: {}, deletedAt: 0, hasText: fs.existsSync(path.join(dir, 'text.txt')) };
+    audit('', 'recover', db.files[id].name, { f: id }); n++; }
+  if (n) { dirty = true; flush(); console.log('Recovered ' + n + ' stored file(s) that were missing from the database. They are in the folder "Recovered" with no user access set.'); }
+})();
 
 /* ---------- permissions ---------- */
 function folderChain(p) { const out = []; if (!p) return out; const ps = p.split('/'); for (let i = 1; i <= ps.length; i++) { const d = db.folders[ps.slice(0, i).join('/')]; if (d) out.push(d); } return out; }
@@ -81,7 +110,8 @@ function sessionUser(req) {
 }
 const fails = new Map();
 const tickets = new Map();
-setInterval(() => { const now = Date.now(); for (const [k, v] of tickets) if (v.exp < now) tickets.delete(k); for (const [k, v] of fails) if (v.until < now && v.at < now - 36e5) fails.delete(k);
+const presence = new Map(); // live monitoring: one entry per signed-in browser, kept in memory only
+setInterval(() => { const now = Date.now(); for (const [k, v] of tickets) if (v.exp < now) tickets.delete(k); for (const [k, v] of presence) if (v.t < now - 5 * 6e4) presence.delete(k); for (const [k, v] of fails) if (v.until < now && v.at < now - 36e5) fails.delete(k);
   let ch = false; for (const [k, s] of Object.entries(db.sessions)) if (s.exp < now) { delete db.sessions[k]; ch = true; } if (ch) save(); }, 6e4).unref();
 
 /* ---------- recycle bin clean-up, daily backup ---------- */
@@ -134,7 +164,7 @@ function stateFor(uid, u) {
     const people = Object.keys(db.users).filter(x => db.users[x].role !== 'admin' && db.users[x].active !== false), files = {}, count = {};
     for (const [id, f] of Object.entries(db.files)) { let n = 0; if (!f.deletedAt) for (const x of people) if (effPerm(f, x)) { n++; count[x] = (count[x] || 0) + 1; } files[id] = Object.assign({}, f, { people: n }); }
     const users = {}; for (const [id, x] of Object.entries(db.users)) users[id] = Object.assign(publicUser(id, x), { fileCount: count[id] || 0 });
-    return Object.assign(base, { admin: true, files, users, groups: db.groups, folders: db.folders, requests: db.requests, comments: db.comments, disk: disk() });
+    return Object.assign(base, { admin: true, files, users, groups: db.groups, folders: db.folders, requests: db.requests, comments: db.comments, disk: disk(), server: { dataDir: DATA, started: STARTED, storageError, saved: fs.existsSync(DBF) ? fs.statSync(DBF).mtimeMs : 0 } });
   }
   const files = {};
   for (const [id, f] of Object.entries(db.files)) { const a = access(f, uid); if (!a.listed) continue;
@@ -171,7 +201,7 @@ async function api(req, res, url) {
   const fileOf = id => { const f = db.files[id]; if (!f) throw new HttpError(404, 'That file no longer exists.'); return f; };
   const ok = extra => send(res, 200, Object.assign({ ok: true }, extra || {}));
 
-  if (p === '/api/logout' && m === 'POST') { delete db.sessions[sess.key]; save(); return send(res, 200, { ok: true }, { 'Set-Cookie': 'nv=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0' }); }
+  if (p === '/api/logout' && m === 'POST') { delete db.sessions[sess.key]; presence.delete(sess.key); save(); return send(res, 200, { ok: true }, { 'Set-Cookie': 'nv=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0' }); }
   if (p === '/api/password' && m === 'POST') { const b = await readJson(req); if (!checkPw(u, b.old || '')) throw new HttpError(400, 'The current password is wrong.'); goodPw(b.new);
     if (b.new === b.old) throw new HttpError(400, 'Choose a password different from the current one.'); setPw(u, b.new); u.mustChange = false;
     for (const [k, s] of Object.entries(db.sessions)) if (s.uid === uid && k !== sess.key) delete db.sessions[k]; save(); audit(uid, 'password', ''); return ok(); }
@@ -185,7 +215,7 @@ async function api(req, res, url) {
     if (!a.p.includes(mode === 'download' ? 'd' : 'v')) throw new HttpError(403, mode === 'download' ? 'You may not download this file.' : 'You may not open this file.');
     let v = f.v; if (admin && b.v != null && (f.versions || []).some(x => x.v === +b.v)) v = +b.v;
     if (mode === 'view' && !admin) { f.views = f.views || {}; f.views[uid] = (+f.views[uid] || 0) + 1; save(); }
-    if (!b.quiet) audit(uid, mode, f.name, { f: mt[1] });
+    if (!(b.quiet && admin)) audit(uid, mode, f.name, { f: mt[1] });
     const t = crypto.randomBytes(24).toString('hex'); tickets.set(t, { uid, fid: mt[1], v, mode, exp: Date.now() + (mode === 'view' ? 8 * 36e5 : 36e5) });
     return ok({ ticket: t, url: '/api/files/' + mt[1] + '/content?t=' + t }); }
   mt = /^\/api\/files\/(f_[a-f0-9]+)\/content$/.exec(p);
@@ -304,6 +334,19 @@ async function api(req, res, url) {
   if (p === '/api/favs' && m === 'POST') { const b = await readJson(req), list = (db.favs[uid] || []).filter(x => x !== b.fid && db.files[x]); if (b.on && db.files[b.fid]) list.push(b.fid); db.favs[uid] = list.slice(-500); save(); return ok(); }
   if (p === '/api/log' && m === 'POST') { const b = await readJson(req), f = fileOf(b.fid); if (b.a !== 'copy' || !access(f, uid).p.includes('c')) throw new HttpError(403, 'Not allowed.'); audit(uid, 'copy', f.name, { f: b.fid }); return ok(); }
 
+  /* live monitoring */
+  if (p === '/api/ping' && m === 'POST') { const b = await readJson(req), now = Date.now(), old = presence.get(sess.key), fid = db.files[b.fid] ? b.fid : '';
+    presence.set(sess.key, { uid, t: now, since: old && now - old.t < 60000 ? old.since : now, ip: ip.replace(/^::ffff:/, ''), ua: str(req.headers['user-agent'], 300), tab: str(b.tab, 20), fid,
+      scroll: Math.max(0, Math.min(1, +b.scroll || 0)), idle: Math.max(0, Math.floor(+b.idle || 0)), hidden: !!b.hidden, folder: cleanPath(b.folder), q: str(b.q, 80), dialog: str(b.dialog, 120) });
+    if (now - (u.lastSeen || 0) > 6e4) { u.lastSeen = now; save(); } return ok(); }
+  if (p === '/api/live' && m === 'GET') { needAdmin(); const now = Date.now(), sessions = [];
+    for (const [k, v] of presence) if (now - v.t < 20000 && db.users[v.uid]) sessions.push(Object.assign({ key: k.slice(0, 16), name: db.files[v.fid] ? db.files[v.fid].name : '' }, v));
+    return send(res, 200, { now, sessions, recent: events.slice(-40).reverse() }); }
+  if (p === '/api/live/watch' && m === 'POST') { needAdmin(); const b = await readJson(req); if (!db.users[b.uid]) throw new HttpError(404, 'That user no longer exists.'); audit(uid, 'watch', '', { u: b.uid }); return ok(); }
+  mt = /^\/api\/users\/(u_[a-f0-9]+)\/kick$/.exec(p);
+  if (mt && m === 'POST') { needAdmin(); if (mt[1] === uid) throw new HttpError(400, 'Use Sign out for your own session.'); if (!db.users[mt[1]]) throw new HttpError(404, 'That user no longer exists.');
+    for (const [k, s] of Object.entries(db.sessions)) if (s.uid === mt[1]) { delete db.sessions[k]; presence.delete(k); } save(); audit(uid, 'kick', '', { u: mt[1] }); return ok(); }
+
   if (p === '/api/audit' && m === 'GET') { needAdmin(); const from = +q.get('from') || Date.now() - 90 * DAY, to = +q.get('to') || Infinity, out = [];
     for (let i = events.length - 1; i >= 0 && out.length < 50000; i--) { const e = events[i]; if (e.t < from) break; if (e.t <= to) out.push(e); } return send(res, 200, { events: out, total: events.length }); }
   throw new HttpError(404, 'Not found');
@@ -316,6 +359,9 @@ const server = http.createServer((req, res) => {
     send(res, e instanceof HttpError ? e.status : 500, { error: e instanceof HttpError ? e.message : 'The server hit a problem. Check the server log.', code: e.code }); });
 });
 server.requestTimeout = 0; server.headersTimeout = 60000; server.timeout = 0;
+server.on('error', e => fatal(e.code === 'EADDRINUSE' ? 'Port ' + PORT + ' is already in use. Numero Vault is probably already running in another window. Close it, or start this one on another port (set PORT).' : e.message));
+process.on('uncaughtException', e => logError('uncaught', e));
+process.on('unhandledRejection', e => logError('unhandled', e));
 server.listen(PORT, HOST, () => console.log('Numero Vault is running on http://localhost:' + PORT + '  (data folder: ' + DATA + ')'));
-for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { flush(); process.exit(0); });
-process.on('exit', flush);
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) process.on(sig, () => process.exit(0));
+process.on('exit', () => { flush(); try { if (+fs.readFileSync(LOCK, 'utf8') === process.pid) fs.unlinkSync(LOCK); } catch (e) {} });

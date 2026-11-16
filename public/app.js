@@ -1,6 +1,6 @@
 "use strict";
 const $ = id => document.getElementById(id);
-const S = { me:null, admin:false, settings:{}, files:{}, users:{}, groups:{}, folders:{}, requests:{}, comments:{}, favs:[], recents:[], disk:null, binDays:30,
+const S = { me:null, admin:false, settings:{}, files:{}, users:{}, groups:{}, folders:{}, requests:{}, comments:{}, favs:[], recents:[], disk:null, binDays:30, live:[], liveRecent:[], viewing:null, pvEl:null, lastInput:Date.now(),
   events:[], aud:null, hits:null, tab:'files', q:'', deep:false, folder:'', view:'all', sort:'new', sel:new Set(), loaded:false, last:'', drill:null, afPending:null };
 const PERMS = [['v','View'],['d','Download'],['c','Copy'],['e','Edit']];
 const DAY = 86400000;
@@ -9,7 +9,7 @@ const ALABEL = {view:'Opened', download:'Downloaded', copy:'Copied text', edit:'
   upload:'Uploaded', bin:'Moved to recycle bin', restore:'Restored from bin', purge:'Deleted forever', access:'Changed file access', folderaccess:'Changed folder access',
   folder:'Changed folder', move:'Moved', version:'Restored version', meta:'Changed details', useradd:'Added user', userremove:'Removed user', userchange:'Changed user',
   group:'Changed group', approve:'Approved request', refuse:'Refused request', reply:'Replied to comment', views:'Reset view count', login:'Signed in', loginfail:'Failed sign-in',
-  password:'Changed password', settings:'Changed settings'};
+  password:'Changed password', settings:'Changed settings', watch:'Watched live', kick:'Signed out user', recover:'Recovered file'};
 const LIBS = { jszip:['jszip.min.js','jszip/3.10.1/jszip.min.js','JSZip'], xlsx:['xlsx.full.min.js','xlsx/0.18.5/xlsx.full.min.js','XLSX'], mammoth:['mammoth.browser.min.js','mammoth/1.6.0/mammoth.browser.min.js','mammoth'],
   pdf:['pdf.min.js','pdf.js/3.11.174/pdf.min.js','pdfjsLib'], pdfworker:['pdf.worker.min.js','pdf.js/3.11.174/pdf.worker.min.js','pdfjsWorker'], pdflib:['pdf-lib.min.js','pdf-lib/1.17.1/pdf-lib.min.js','PDFLib'] };
 const libP = {};
@@ -82,7 +82,7 @@ async function refresh(force){
   if (d.mustChange){ S.me = d.me; S.settings = d.settings || {}; applyTheme(); showApp(); forcePassword(); return; }
   const txt = JSON.stringify(d); if (!force && txt===S.last) return; S.last = txt;
   Object.assign(S, {me:d.me, admin:!!d.admin, settings:d.settings||{}, files:d.files||{}, users:d.users||{}, groups:d.groups||{}, folders:d.folders||{}, requests:d.requests||{}, comments:d.comments||{},
-    favs:d.favs||[], recents:d.recents||[], disk:d.disk||null, binDays:d.binDays||30, loaded:true});
+    favs:d.favs||[], recents:d.recents||[], server:d.server||null, disk:d.disk||null, binDays:d.binDays||30, loaded:true});
   applyTheme(); showApp(); setupRole(); render();
 }
 async function loadEvents(){ if (!S.admin) return; try { S.events = (await api('GET', '/api/audit')).events || []; } catch(e){} }
@@ -182,7 +182,7 @@ function pendingRequests(){ return Object.entries(S.requests).map(([id,r]) => Ob
 /* ---------- rendering ---------- */
 let roleSet = false;
 function setupRole(){
-  $('adminHelp').classList.toggle('hide', !S.admin); $('uploadBtn').classList.toggle('hide', !S.admin);
+  $('adminHelp').classList.toggle('hide', !S.admin); $('uploadBtn').classList.toggle('hide', !S.admin); $('monNote').classList.toggle('hide', S.admin);
   for (const b of $('tabs').children) b.classList.toggle('hide', !S.admin && b.dataset.tab!=='files');
   $('subline').textContent = S.admin ? 'Documents, sheets, slides, PDFs and images, opened only by the people you allow.' : 'Files shared with you. The letters beside each file show what you may do with it.';
   if (!roleSet){ roleSet = true; setTab(location.hash.slice(1) || 'files'); }
@@ -192,10 +192,13 @@ function render(){
   renderWho(); if (!S.loaded) return;
   if (S.tab==='files'){ renderFiles(); return; }
   if (!S.admin) return;
-  if (S.tab==='people') renderPeople(); else if (S.tab==='requests') renderRequests(); else if (S.tab==='dashboard') renderDash(); else if (S.tab==='audit') renderAudit();
+  if (S.tab==='live') renderLive(); else if (S.tab==='people') renderPeople(); else if (S.tab==='requests') renderRequests(); else if (S.tab==='dashboard') renderDash(); else if (S.tab==='audit') renderAudit();
 }
 function renderWho(){
   const w = $('who'); if (!S.me){ w.replaceChildren(); return; }
+  const sv = S.admin && S.server, warn = $('storeWarn'), info = $('storeInfo');
+  warn.classList.toggle('hide', !(sv && sv.storageError)); if (sv && sv.storageError) warn.textContent = 'Nothing is being saved right now. '+sv.storageError+' Check that the server account may write to that folder and that the disk is not full.';
+  info.classList.toggle('hide', !sv); if (sv) info.textContent = 'Data folder on the server: '+sv.dataDir+' · last saved '+(sv.saved ? fmtDate(sv.saved) : 'never')+' · server running since '+fmtDate(sv.started);
   w.replaceChildren(...[h('div',null, h('div',{text:S.me.name,style:'font-weight:600'}), h('div',{class:'sub',text:S.me.username})), S.admin ? h('span',{class:'pill admin',text:'Admin'}) : null].filter(Boolean));
   if (S.admin){ const n = pendingRequests().length, b = $('reqN'); b.textContent = n; b.classList.toggle('hide', !n); }
 }
@@ -683,15 +686,17 @@ async function renderPptx(blob, W, urls){
   }
   return {stages, text:texts.map((t,i)=>'Slide '+(i+1)+'\n'+t).join('\n\n'), count:names.length};
 }
-async function openPreview(f){
+async function openPreview(f, opts){
+  opts = opts || {};
   if (f.over){ toast('You have used all your views of this file. Open Details to request more.'); return; }
   if (!f.p.includes('v')) return;
-  let ticket; try { ticket = await api('POST','/api/files/'+f.id+'/open',{mode:'view'}); } catch(e){ toast(errMsg(e)); refresh(true); return; }
+  let ticket; try { ticket = await api('POST','/api/files/'+f.id+'/open',{mode:'view', quiet:!!opts.quiet}); } catch(e){ toast(errMsg(e)); refresh(true); return; }
   const src = ticket.url, canCopy = f.p.includes('c'), kind = kindOf(f.name), urls = [], BIG = 200*1048576;
   let text = null, editor = null;
   const pv = h('div',{class:'pv'+(canCopy?'':' locked')}, h('div',{class:'sub',text:'Loading '+f.name+'…'}));
   if (!canCopy) for (const ev of ['copy','cut','contextmenu','dragstart','selectstart']) pv.addEventListener(ev, e => e.preventDefault());
   const wrap = h('div',{class:'pvwrap'}, pv);
+  S.viewing = opts.follow ? null : f.id; S.pvEl = pv;
   if (!S.admin){ const stamp = S.me.name+' · '+fmtDate(Date.now()); wrap.appendChild(h('div',{class:'wm','aria-hidden':'true'}, Array.from({length:70}, ()=>h('span',{text:stamp})))); }
   const copyBtn = h('button',{class:'btn sm hide',text:'Copy text',onclick:async()=>{ try { await navigator.clipboard.writeText(editor ? editor.value : text); toast('Text copied.'); } catch(e){ toast('Select the text and press Ctrl+C or Cmd+C.'); }
     api('POST','/api/log',{a:'copy', fid:f.id}).catch(()=>{}); }});
@@ -699,7 +704,7 @@ async function openPreview(f){
     try { await replaceContent(f, new Blob([editor.value],{type:'text/plain'}), f.name); closeModal(); toast('Saved a new version.'); refresh(true); } catch(e){ toast(errMsg(e)); saveBtn.disabled = false; } }});
   const head = [permChips(f.p), copyBtn, saveBtn, f.p.includes('d') ? h('button',{class:'btn sm',text:'Download',onclick:()=>download(f)}) : null].filter(Boolean);
   let open = true;
-  openModal(f.name, [wrap], [], {wide:true, flush:true, head, onclose:()=>{ open = false; urls.forEach(u=>URL.revokeObjectURL(u)); refresh(true); }});
+  openModal(opts.title || f.name, [opts.banner || null, wrap], [], {wide:true, flush:true, head, onclose:()=>{ open = false; S.viewing = null; S.pvEl = null; urls.forEach(u=>URL.revokeObjectURL(u)); if (opts.onclose) opts.onclose(); else refresh(true); }});
   const show = (...nodes) => { if (open) pv.replaceChildren(...nodes); };
   const offerText = t => { text = t; if (canCopy && t) copyBtn.classList.remove('hide'); };
   const bytes = async () => { if (f.size > BIG) throw {message:'This file is '+fmtSize(f.size)+', too large to preview in the browser.'+(f.p.includes('d') ? ' Download it instead.' : '')};
@@ -742,7 +747,7 @@ async function openPreview(f){
     }
     else if (kind==='text'){
       const t = await (await bytes()).text();
-      if (f.p.includes('e') && t.length < 1000000){ editor = h('textarea',{id:'pvEditor','aria-label':'File content',spellcheck:'false'}); editor.value = t; show(editor); saveBtn.classList.remove('hide'); offerText(t); }
+      if (f.p.includes('e') && !opts.follow && t.length < 1000000){ editor = h('textarea',{id:'pvEditor','aria-label':'File content',spellcheck:'false'}); editor.value = t; show(editor); if (open) S.pvEl = editor; saveBtn.classList.remove('hide'); offerText(t); }
       else { show(h('pre',{text:t.length > 1000000 ? t.slice(0,1000000)+'\n… (cut)' : t})); offerText(t); }
     }
     else show(h('div',{class:'empty'}, h('strong',{text:'No preview for this file type'}), h('span',{text:f.p.includes('d') ? 'Download it to open it on your computer.' : 'You may view this file but not download it, and .'+extOf(f.name)+' files cannot be shown in the browser. Open Details to request download access.'})));
@@ -750,12 +755,12 @@ async function openPreview(f){
 }
 
 /* ---------- wiring ---------- */
-const TABS = ['files','people','requests','dashboard','audit'];
+const TABS = ['files','live','people','requests','dashboard','audit'];
 function setTab(t){ if (!TABS.includes(t) || (!S.admin && t!=='files')) t = 'files'; S.tab = t;
   for (const b of $('tabs').children) b.setAttribute('aria-selected', String(b.dataset.tab===t));
   for (const p of TABS) $('pane-'+p).classList.toggle('hide', p!==t);
-  $('fileNav').classList.toggle('hide', t!=='files'); $('pageTitle').textContent = {files:'Files',people:'People',requests:'Requests',dashboard:'Dashboard',audit:'Audit log'}[t];
-  render(); if (t==='dashboard' || t==='audit') loadEvents().then(() => { if (S.tab===t) render(); }); }
+  $('fileNav').classList.toggle('hide', t!=='files'); $('pageTitle').textContent = {files:'Files',live:'Live monitoring',people:'People',requests:'Requests',dashboard:'Dashboard',audit:'Audit log'}[t];
+  render(); if (t==='live') pollLive(); if (t==='dashboard' || t==='audit') loadEvents().then(() => { if (S.tab===t) render(); }); }
 function goTab(t){ setTab(t); try { history.replaceState(null, '', '#'+t); } catch(e){} }
 $('tabs').addEventListener('click', e => { const b = e.target.closest('button'); if (b) goTab(b.dataset.tab); });
 window.addEventListener('hashchange', () => setTab(location.hash.slice(1) || 'files'));
@@ -768,6 +773,57 @@ const pf = $('filePanel');
 pf.addEventListener('dragover', e => { if (S.admin){ e.preventDefault(); pf.classList.add('drop'); } });
 pf.addEventListener('dragleave', () => pf.classList.remove('drop'));
 pf.addEventListener('drop', e => { if (!S.admin) return; e.preventDefault(); pf.classList.remove('drop'); if (e.dataTransfer && e.dataTransfer.files) pickFiles(e.dataTransfer.files); });
+
+/* ---------- live monitoring ---------- */
+for (const ev of ['mousemove','keydown','mousedown','wheel','touchstart','scroll']) window.addEventListener(ev, () => { S.lastInput = Date.now(); }, {passive:true, capture:true});
+function ping(){ if (!S.loaded || !S.me || forcedOpen || $('app').classList.contains('hide')) return;
+  const el = S.pvEl, max = el ? el.scrollHeight-el.clientHeight : 0, t = $('mhead').querySelector('h2');
+  fetch('/api/ping', {method:'POST', credentials:'same-origin', keepalive:true, headers:{'X-Vault':'1','Content-Type':'application/json'}, body:JSON.stringify({tab:S.tab, fid:S.viewing||'', scroll:el && max>0 ? el.scrollTop/max : 0,
+    idle:(Date.now()-S.lastInput)/1000, hidden:document.visibilityState!=='visible', folder:S.folder, q:S.q, dialog:!S.viewing && $('overlay').classList.contains('open') && t ? t.textContent : ''})}).catch(()=>{}); }
+setInterval(ping, 4000); document.addEventListener('visibilitychange', ping);
+const dur = s => s < 60 ? Math.round(s)+' s' : s < 3600 ? Math.round(s/60)+' min' : Math.floor(s/3600)+' h '+Math.round(s%3600/60)+' min';
+function device(ua){ const b = /Edg\//.test(ua) ? 'Edge' : /OPR\//.test(ua) ? 'Opera' : /Chrome\//.test(ua) ? 'Chrome' : /Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : 'Browser';
+  const o = /Windows/.test(ua) ? 'Windows' : /Android/.test(ua) ? 'Android' : /iPhone|iPad/.test(ua) ? 'iOS' : /Mac OS/.test(ua) ? 'Mac' : /Linux/.test(ua) ? 'Linux' : ''; return b+(o ? ' on '+o : ''); }
+function doing(s){ if (s.fid) return 'Viewing '+(s.name || 'a file')+' · '+Math.round(s.scroll*100)+'% down';
+  const page = {files:'On the Files list', live:'On Live monitoring', people:'On People', requests:'On Requests', dashboard:'On the Dashboard', audit:'On the Audit log'}[s.tab] || 'In the vault';
+  return page+(s.tab==='files' && s.folder ? ' · folder '+s.folder : '')+(s.tab==='files' && s.q ? ' · searching "'+s.q+'"' : '')+(s.dialog ? ' · dialog: '+s.dialog : ''); }
+function statusOf(s){ return s.hidden ? ['away','Vault tab in background'] : s.idle > 120 ? ['idle','Idle for '+dur(s.idle)] : ['','Active']; }
+let liveBusy = false;
+async function pollLive(){ if (!S.admin || liveBusy) return; liveBusy = true;
+  try { const r = await api('GET','/api/live'); S.live = r.sessions || []; S.liveRecent = r.recent || []; S.liveNow = r.now;
+    const n = new Set(S.live.filter(s=>s.uid!==S.me.id).map(s=>s.uid)).size, b = $('liveN'); b.textContent = n; b.classList.toggle('hide', !n);
+    if (S.tab==='live' && !$('overlay').classList.contains('open')) renderLive(); followTick(); } catch(e){}
+  liveBusy = false; }
+setInterval(() => { if (S.admin && document.visibilityState==='visible' && (S.tab==='live' || watch)) pollLive(); }, 3000);
+setInterval(() => { if (S.admin && document.visibilityState==='visible' && S.tab!=='live' && !watch) pollLive(); }, 20000);
+function renderLive(){
+  const list = S.live.slice().sort((a,b)=>pname(a.uid).localeCompare(pname(b.uid))), others = new Set(list.filter(s=>s.uid!==S.me.id).map(s=>s.uid)).size;
+  $('liveSum').textContent = others+' of '+Object.values(S.users).filter(u=>u.active).length+' users online (not counting you)';
+  $('liveList').replaceChildren(list.length ? h('table',null, h('thead',null, h('tr',null, h('th',{text:'Person'}), h('th',{text:'Status'}), h('th',{text:'Doing now'}), h('th',{text:'Online for'}), h('th',{text:'Address'}), h('th',{text:'Device'}), h('th',null))),
+    h('tbody',null, list.map(s => { const [cls, label] = statusOf(s), self = s.uid===S.me.id;
+      return h('tr',null, h('td',null, h('div',{text:pname(s.uid)+(self?' (you)':''),style:'font-weight:500'}), h('div',{class:'sub',text:(S.users[s.uid]||{}).username||''})),
+        h('td',null, h('span',{class:'dot '+cls}), label), h('td',{text:doing(s)}), h('td',{class:'meta',text:dur((S.liveNow-s.since)/1000)}), h('td',{class:'meta',text:s.ip}), h('td',{class:'meta',text:device(s.ua)}),
+        h('td',null, h('div',{class:'acts'}, self ? null : h('button',{class:'btn sm primary',text:'Watch',onclick:()=>startWatch(s)}),
+          self ? null : h('button',{class:'btn sm danger',text:'Sign out',onclick:async()=>{ if (await confirmDialog('Sign out user', 'Sign '+pname(s.uid)+' out of the vault on every device now? They can sign in again unless you deactivate them on the People tab.', 'Sign out')) act(()=>api('POST','/api/users/'+s.uid+'/kick'), 'Signed out.'); }})))); })))
+    : h('div',{class:'empty'}, h('strong',{text:'Nobody is online'}), h('span',{text:'People appear here within a few seconds of opening the vault.'})));
+  $('liveFeed').replaceChildren(S.liveRecent.length ? eventTable(S.liveRecent, true) : h('div',{class:'empty'}, h('span',{text:'Nothing recorded yet.'})));
+}
+let watch = null, watchSwitch = false;
+function startWatch(s){ api('POST','/api/live/watch',{uid:s.uid}).catch(()=>{}); watch = {key:s.key, uid:s.uid, state:null}; followTick(); }
+function stopWatch(){ watch = null; }
+function followTick(){
+  if (!watch) return; const s = S.live.find(x => x.key===watch.key), name = pname(watch.uid);
+  const state = !s ? 'offline' : s.fid && S.files[s.fid] ? 'file:'+s.fid : 'page:'+doing(s)+'|'+statusOf(s)[1];
+  if (state !== watch.state){ watch.state = state; watchSwitch = true;
+    const done = () => { if (!watchSwitch) stopWatch(); };
+    if (state.startsWith('file:')){ const bar = h('div',{class:'watchbar'}, h('span',{text:'Watching '+name+' live. This view follows the file they have open and how far they have scrolled.'}), h('span',{id:'watchPos'}));
+      openPreview(norm(s.fid, S.files[s.fid]), {quiet:true, follow:true, title:'Watching '+name+': '+S.files[s.fid].name, banner:bar, onclose:done}).then(()=>{ watchSwitch = false; }); return; }
+    openModal('Watching '+name, [h('p',{style:'margin:0',text:!s ? name+' is no longer online.' : name+' has no file open right now.'}), s ? h('dl',{class:'kv'}, h('dt',{text:'Doing now'}), h('dd',{text:doing(s)}), h('dt',{text:'Status'}), h('dd',{text:statusOf(s)[1]})) : null,
+      h('div',{class:'sub',text:s ? 'This window switches to the file as soon as they open one.' : ''})], [h('button',{class:'btn primary',text:'Stop watching',onclick:()=>closeModal()})], {onclose:done});
+    watchSwitch = false; if (!s) watch.key = ''; return; }
+  if (s && s.fid && S.pvEl){ const el = S.pvEl, max = el.scrollHeight-el.clientHeight; if (max > 0) el.scrollTo({top:s.scroll*max, behavior:'smooth'});
+    const p = $('watchPos'); if (p) p.textContent = statusOf(s)[1]+' · '+Math.round(s.scroll*100)+'% down'; }
+}
 
 applyTheme();
 refresh(true);

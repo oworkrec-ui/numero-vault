@@ -41,6 +41,15 @@ DOCUMENT VIEWERS WITHOUT INTERNET
       node get-libs.js
   It saves them into public/vendor and the vault then needs no internet at all.
 
+LIVE MONITORING (admins)
+  The Live menu shows who is signed in right now, whether they are active or idle, the
+  page or file they have open, their network address and browser. "Watch" opens the same
+  file and follows how far the person has scrolled. "Sign out" ends all of that person's
+  sessions at once. Each Watch and Sign out is written to the audit log.
+  This covers what the person does inside Numero Vault. It cannot see other windows or
+  programs on their computer. Users are told on the sign-in page and in the menu that
+  their activity is recorded and can be watched live.
+
 KEEP IT RUNNING
   Windows: install it as a service with NSSM (nssm install NumeroVault "C:\Program Files\nodejs\node.exe" "C:\NumeroVault\server.js")
            or add start.bat to Task Scheduler "At startup".
